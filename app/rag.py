@@ -1,7 +1,7 @@
 """RAG : retrieval pgvector (+ réponse Claude citée, optionnelle) + trace Langfuse."""
 from __future__ import annotations
 
-from . import db, embeddings
+from . import db, embeddings, perms, rerank
 from .config import settings
 from .obs import log_generation, observe
 
@@ -40,23 +40,51 @@ def _answer_with_claude(question: str, passages: list[dict], trace) -> dict:
     return {"answer": answer, "usage": usage}
 
 
-def query(question: str, top_k: int | None = None) -> dict:
+def query(question: str, top_k: int | None = None, *, role: str | None = None,
+          domains: list[str] | None = None, versions: list[str] | None = None) -> dict:
+    """RAG hybride + reranking + permissions + citations systématiques."""
     k = top_k or settings.top_k
-    with observe(name="hermes.query", input={"question": question}, metadata={"top_k": k}) as trace:
+    eff_domains, eff_versions, perm_info = perms.resolve(role, domains, versions)
+
+    with observe(name="hermes.query", input={"question": question},
+                 metadata={"top_k": k, "permissions": perm_info}) as trace:
         qvec = embeddings.embed_query(question)
-        passages = db.search(qvec, top_k=k)
-        citations = [
-            {"n": i + 1, "source_key": p["source_key"], "version": p.get("version"),
-             "score": round(float(p["score"]), 4)}
-            for i, p in enumerate(passages)
-        ]
+        candidates = db.hybrid_search(qvec, question, domains=eff_domains, versions=eff_versions)
+        passages, rmethod = rerank.rerank(question, candidates, k)
+
+        # Citations SYSTÉMATIQUES (toujours présentes, traçables à la source)
+        citations = []
+        for i, p in enumerate(passages):
+            citations.append({
+                "n": i + 1,
+                "source_key": p["source_key"],
+                "version": p.get("version"),
+                "domaine": p.get("domaine"),
+                "chunk_index": p.get("chunk_index"),
+                "retrieval": p.get("methods", []),
+                "scores": {
+                    "vector": round(float(p.get("vscore") or 0), 4),
+                    "lexical": round(float(p.get("lscore") or 0), 4),
+                    "rrf": round(float(p.get("rrf") or 0), 5),
+                    **({"rerank": round(float(p["rerank_score"]), 4)} if "rerank_score" in p else {}),
+                },
+            })
+
         result = {
             "question": question,
+            "retrieval": {"mode": "hybride (vectoriel + lexical, RRF)",
+                          "reranking": rmethod, "permissions": perm_info},
             "citations": citations,
             "passages": [{"n": i + 1, "content": p["content"][:800], **citations[i]}
                          for i, p in enumerate(passages)],
         }
-        if settings.llm_configured and passages:
+
+        if not passages:
+            result["answer"] = None
+            result["note"] = "Aucun extrait autorisé/pertinent pour cette requête (permissions ou corpus)."
+            return result
+
+        if settings.llm_configured:
             try:
                 a = _answer_with_claude(question, passages, trace)
                 result["answer"] = a["answer"]

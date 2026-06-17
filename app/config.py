@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # --- Service ---
     app_name: str = "Hermes RAG CEGID"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     log_level: str = "INFO"
 
     # --- PostgreSQL / pgvector ---
@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     chunk_size: int = 1200      # caractères
     chunk_overlap: int = 200
     ingest_batch: int = 64
+
+    # --- Recherche hybride (vectorielle + lexicale) ---
+    hybrid_vector_k: int = 30      # candidats vectoriels
+    hybrid_lexical_k: int = 30     # candidats lexicaux (BM25/ts_rank)
+    rrf_k: int = 60                # constante Reciprocal Rank Fusion
+    ts_config: str = "french"      # config full-text PostgreSQL
+
+    # --- Reranking (cross-encoder, optionnel, dégradé en RRF si indispo) ---
+    rerank_enabled: bool = True
+    rerank_model: str = "jinaai/jina-reranker-v2-base-multilingual"
+    rerank_candidates: int = 20    # nb de candidats fusionnés à reranker
+
+    # --- Permissions au retrieval (par rôle / domaine) ---
+    # JSON: {"role": {"domains": [...], "versions": [...]}}  (listes = autorisé ; absent = tout)
+    role_policy: str = "{}"
+    permissions_default: str = "allow"  # "allow" ou "deny" pour un rôle hors policy
 
     # --- LLM réponse (Claude) — optionnel ---
     anthropic_api_key: str | None = None
@@ -60,6 +76,14 @@ class Settings(BaseSettings):
     @property
     def langfuse_configured(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key and self.langfuse_host)
+
+    @property
+    def role_policy_parsed(self) -> dict:
+        import json
+        try:
+            return json.loads(self.role_policy) or {}
+        except Exception:
+            return {}
 
 
 settings = Settings()

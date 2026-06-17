@@ -43,11 +43,24 @@ def init_schema() -> None:
             )
             """
         )
-        # Index ANN (cosine). ivfflat nécessite des données pour être efficace ;
-        # créé tôt, il reste valide.
+        # Colonne lexicale full-text (générée depuis content) — se peuple
+        # automatiquement pour les lignes existantes lors de l'ajout.
+        conn.execute(
+            f"ALTER TABLE {settings.pg_table} ADD COLUMN IF NOT EXISTS tsv tsvector "
+            f"GENERATED ALWAYS AS (to_tsvector('{settings.ts_config}', content)) STORED"
+        )
+        # Index ANN (cosine) + GIN (lexical) + filtres permissions.
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS {settings.pg_table}_embed_idx "
             f"ON {settings.pg_table} USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {settings.pg_table}_tsv_idx "
+            f"ON {settings.pg_table} USING gin (tsv)"
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {settings.pg_table}_acl_idx "
+            f"ON {settings.pg_table} (version, domaine)"
         )
         conn.execute(
             f"CREATE INDEX IF NOT EXISTS {settings.pg_table}_src_idx ON {settings.pg_table} (source_key)"
@@ -80,20 +93,66 @@ def upsert_chunks(rows: Iterable[dict]) -> int:
     return n
 
 
-def search(query_embedding, top_k: int = 6) -> list[dict]:
+def _acl(domains, versions):
+    """Construit la clause WHERE de permissions (par domaine/version)."""
+    clauses, params = [], []
+    if domains is not None:
+        clauses.append("domaine = ANY(%s)"); params.append(list(domains))
+    if versions is not None:
+        clauses.append("version = ANY(%s)"); params.append(list(versions))
+    return clauses, params
+
+
+def _vector_candidates(conn, qvec, k, domains, versions):
+    clauses, ap = _acl(domains, versions)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = (f"SELECT id, source_key, version, domaine, chunk_index, content, "
+           f"1-(embedding<=>%s) AS vscore FROM {settings.pg_table}{where} "
+           f"ORDER BY embedding<=>%s LIMIT %s")
+    cur = conn.execute(sql, [qvec, *ap, qvec, k])
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _lexical_candidates(conn, qtext, k, domains, versions):
+    clauses, ap = _acl(domains, versions)
+    tsq = f"websearch_to_tsquery('{settings.ts_config}', %s)"
+    conds = [f"tsv @@ {tsq}"] + clauses
+    where = " WHERE " + " AND ".join(conds)
+    sql = (f"SELECT id, source_key, version, domaine, chunk_index, content, "
+           f"ts_rank(tsv, {tsq}) AS lscore FROM {settings.pg_table}{where} "
+           f"ORDER BY lscore DESC LIMIT %s")
+    # %s ordre : ts_rank(qtext) | WHERE tsv@@(qtext) | clauses ACL | LIMIT
+    cur = conn.execute(sql, [qtext, qtext, *ap, k])
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def hybrid_search(qvec, qtext, *, domains=None, versions=None) -> list[dict]:
+    """Recherche hybride : vectorielle + lexicale, fusionnées par Reciprocal Rank
+    Fusion (RRF). Renvoie jusqu'à `rerank_candidates` chunks (avec scores + méthodes)
+    pour reranking en aval. Filtres de permissions appliqués DANS le SQL.
+    """
+    if domains == [] or versions == []:   # deny explicite -> rien
+        return []
     with connect() as conn:
-        cur = conn.execute(
-            f"""
-            SELECT source_key, version, domaine, chunk_index, content, metadata,
-                   1 - (embedding <=> %s) AS score
-            FROM {settings.pg_table}
-            ORDER BY embedding <=> %s
-            LIMIT %s
-            """,
-            (query_embedding, query_embedding, top_k),
-        )
-        cols = [d.name for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        vec = _vector_candidates(conn, qvec, settings.hybrid_vector_k, domains, versions)
+        lex = _lexical_candidates(conn, qtext, settings.hybrid_lexical_k, domains, versions)
+
+    by_id: dict = {}
+    K = settings.rrf_k
+    for rank, row in enumerate(vec):
+        e = by_id.setdefault(row["id"], {**row, "lscore": 0.0, "rrf": 0.0, "methods": set()})
+        e["rrf"] += 1.0 / (K + rank + 1); e["methods"].add("vector")
+    for rank, row in enumerate(lex):
+        e = by_id.get(row["id"])
+        if e is None:
+            e = by_id.setdefault(row["id"], {**row, "vscore": 0.0, "rrf": 0.0, "methods": set()})
+        e["rrf"] += 1.0 / (K + rank + 1); e["methods"].add("lexical"); e["lscore"] = row["lscore"]
+    fused = sorted(by_id.values(), key=lambda r: r["rrf"], reverse=True)
+    for r in fused:
+        r["methods"] = sorted(r["methods"])
+    return fused[: settings.rerank_candidates]
 
 
 def stats() -> dict:

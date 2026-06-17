@@ -71,6 +71,9 @@ def post_ingest(req: IngestReq):
 class QueryReq(BaseModel):
     question: str
     top_k: int | None = None
+    role: str | None = None               # permissions : rôle de l'appelant
+    domains: list[str] | None = None      # filtre explicite par domaine
+    versions: list[str] | None = None     # filtre explicite par version
 
 
 @app.post("/query")
@@ -78,7 +81,8 @@ def post_query(req: QueryReq):
     if not settings.db_configured:
         raise HTTPException(503, "DB non configurée")
     from .rag import query
-    return query(req.question, top_k=req.top_k)
+    return query(req.question, top_k=req.top_k, role=req.role,
+                 domains=req.domains, versions=req.versions)
 
 
 @app.on_event("startup")

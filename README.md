@@ -42,11 +42,26 @@ Image Docker (voir `Dockerfile`). Sur Coolify : application Git, réseau `recett
 (pour joindre Postgres, MinIO et Langfuse), port interne `8000`. Volume persistant
 recommandé sur `/data` (cache du modèle d'embeddings).
 
-## Limites v1
+## Retrieval (v2)
+
+- **Hybride** : recherche **vectorielle** (cosinus pgvector) + **lexicale** (full-text
+  PostgreSQL `tsvector`/`ts_rank`, config `french`), fusionnées par **Reciprocal Rank
+  Fusion (RRF)**.
+- **Reranking** par cross-encoder (fastembed `TextCrossEncoder`, multilingue) — dégradé
+  proprement en RRF si le modèle est indisponible.
+- **Citations systématiques** : chaque passage renvoyé porte sa source (`source_key`,
+  `version`, `domaine`, `chunk_index`, méthode de retrieval, scores).
+- **Permissions au retrieval** (par **rôle** / **domaine** / **version**) : le rôle de
+  l'appelant (`role`) est mappé via `ROLE_POLICY` vers les domaines/versions autorisés,
+  appliqués **dans le SQL** — un chunk non autorisé n'est jamais récupéré ni cité.
+  `/query` accepte aussi un filtre explicite `domains` / `versions`.
+
+Exemple `ROLE_POLICY` : `{"compta": {"versions": ["V11"], "domains": ["audit-flux"]}}`.
+
+## Limites
 
 - Types ingérés : `pdf, docx, pptx, txt, md, csv, html, xml`. **Non gérés** : `.chm`,
-  `.doc` (binaire), médias — à ajouter en v2.
-- Retrieval vectoriel pur (cosinus) ; le retrieval hybride (BM25 + reranking) est prévu en v2.
+  `.doc` (binaire), OCR des images — prévus ultérieurement.
 
 ---
 NEXERP — IA Factory · `11-Agents-AI/Hermes`
