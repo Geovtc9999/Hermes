@@ -84,9 +84,15 @@ def post_query(req: QueryReq):
 @app.on_event("startup")
 def _startup():
     log.info("Hermes %s — démarrage", settings.app_version)
-    # Préchargement du modèle d'embeddings (téléchargement ONNX au 1er boot).
-    try:
-        dim = embeddings.warmup()
-        log.info("Embeddings prêts (%s, dim=%s)", settings.embed_model, dim)
-    except Exception as e:
-        log.warning("Embeddings non préchargés: %s", e)
+    # Préchargement NON bloquant du modèle d'embeddings (téléchargement ONNX ~1 Go au
+    # 1er boot) dans un thread : /health reste disponible immédiatement.
+    import threading
+
+    def _warm():
+        try:
+            dim = embeddings.warmup()
+            log.info("Embeddings prêts (%s, dim=%s)", settings.embed_model, dim)
+        except Exception as e:  # le modèle se chargera paresseusement au 1er appel
+            log.warning("Préchargement embeddings différé: %s", e)
+
+    threading.Thread(target=_warm, daemon=True).start()
