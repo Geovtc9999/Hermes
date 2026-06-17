@@ -103,13 +103,19 @@ def _acl(domains, versions):
     return clauses, params
 
 
+def _vlit(qvec) -> str:
+    """Littéral vecteur pgvector '[v1,v2,...]' (cast ::vector côté SQL)."""
+    return "[" + ",".join(str(float(x)) for x in qvec) + "]"
+
+
 def _vector_candidates(conn, qvec, k, domains, versions):
     clauses, ap = _acl(domains, versions)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    v = _vlit(qvec)
     sql = (f"SELECT id, source_key, version, domaine, chunk_index, content, "
-           f"1-(embedding<=>%s) AS vscore FROM {settings.pg_table}{where} "
-           f"ORDER BY embedding<=>%s LIMIT %s")
-    cur = conn.execute(sql, [qvec, *ap, qvec, k])
+           f"1-(embedding<=>%s::vector) AS vscore FROM {settings.pg_table}{where} "
+           f"ORDER BY embedding<=>%s::vector LIMIT %s")
+    cur = conn.execute(sql, [v, *ap, v, k])
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
