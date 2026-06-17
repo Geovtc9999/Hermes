@@ -43,15 +43,22 @@ def ingest_one(key: str) -> dict:
     return {"key": key, "status": "ok", "chunks": n, "version": version}
 
 
-def ingest(prefix: str = "", limit: int | None = None) -> dict:
-    """Ingère le corpus (ou un sous-ensemble par préfixe / limite). Tracé Langfuse."""
+def ingest(prefix: str = "", limit: int | None = None, force: bool = False) -> dict:
+    """Ingère le corpus (ou un sous-ensemble). Reprenable : par défaut, les sources
+    déjà indexées sont sautées (force=True pour tout ré-ingérer). Tracé Langfuse."""
     db.init_schema()
     objects = storage.list_objects(prefix=prefix)
     objects = [o for o in objects if supported(o["key"])]
+    deja = 0
+    if not force:
+        done = db.existing_sources()
+        before = len(objects)
+        objects = [o for o in objects if o["key"] not in done]
+        deja = before - len(objects)
     if limit:
         objects = objects[:limit]
 
-    with observe(name="hermes.ingest", metadata={"prefix": prefix, "candidats": len(objects)}):
+    with observe(name="hermes.ingest", metadata={"prefix": prefix, "candidats": len(objects), "deja_indexes": deja}):
         ok = skip = err = total_chunks = 0
         details = []
         for o in objects:
@@ -66,5 +73,5 @@ def ingest(prefix: str = "", limit: int | None = None) -> dict:
                 skip += 1
             else:
                 err += 1
-    return {"candidats": len(objects), "ingerés": ok, "ignorés": skip,
-            "erreurs": err, "chunks": total_chunks, "details": details[:50]}
+    return {"candidats": len(objects), "deja_indexes": deja, "ingerés": ok,
+            "ignorés": skip, "erreurs": err, "chunks": total_chunks, "details": details[:50]}

@@ -57,6 +57,7 @@ def get_stats():
 class IngestReq(BaseModel):
     prefix: str = ""
     limit: int | None = None
+    force: bool = False   # True = ré-ingère même les sources déjà indexées
 
 
 @app.post("/ingest")
@@ -65,7 +66,7 @@ def post_ingest(req: IngestReq):
         raise HTTPException(503, "Stockage objet non configuré")
     if not settings.db_configured:
         raise HTTPException(503, "DB non configurée")
-    return ingest(prefix=req.prefix, limit=req.limit)
+    return ingest(prefix=req.prefix, limit=req.limit, force=req.force)
 
 
 class QueryReq(BaseModel):

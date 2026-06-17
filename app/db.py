@@ -155,6 +155,15 @@ def hybrid_search(qvec, qtext, *, domains=None, versions=None) -> list[dict]:
     return fused[: settings.rerank_candidates]
 
 
+def existing_sources() -> set[str]:
+    """Sources déjà indexées (pour une ingestion reprenable / idempotente)."""
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT source_key FROM {settings.pg_table}"
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
 def stats() -> dict:
     with connect() as conn:
         total = conn.execute(f"SELECT count(*) FROM {settings.pg_table}").fetchone()[0]
