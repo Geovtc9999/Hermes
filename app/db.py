@@ -122,7 +122,12 @@ def _vector_candidates(conn, qvec, k, domains, versions):
 
 def _lexical_candidates(conn, qtext, k, domains, versions):
     clauses, ap = _acl(domains, versions)
-    tsq = f"websearch_to_tsquery('{settings.ts_config}', %s)"
+    # Recherche lexicale type BM25 : on construit une requête OU (n'importe quel
+    # terme), classée par ts_rank — bien plus utile pour le RAG que le ET strict
+    # de websearch_to_tsquery (qui exigerait TOUS les mots de la question).
+    # to_tsquery via la conversion plainto -> remplacement des '&' par '|'.
+    tsq = (f"to_tsquery('{settings.ts_config}', "
+           f"replace(plainto_tsquery('{settings.ts_config}', %s)::text, '&', '|'))")
     conds = [f"tsv @@ {tsq}"] + clauses
     where = " WHERE " + " AND ".join(conds)
     sql = (f"SELECT id, source_key, version, domaine, chunk_index, content, "
