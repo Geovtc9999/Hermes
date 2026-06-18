@@ -4,9 +4,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     FASTEMBED_CACHE_PATH=/data/models
 
-# libgomp1 requis par onnxruntime (fastembed)
+# libgomp1 requis par onnxruntime (fastembed) + CLI Infisical (injection runtime des secrets)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 ca-certificates \
+    && apt-get install -y --no-install-recommends libgomp1 ca-certificates curl bash \
+    && curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | bash \
+    && apt-get update && apt-get install -y --no-install-recommends infisical \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data/models
 
