@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # --- Service ---
     app_name: str = "Hermes RAG CEGID"
-    app_version: str = "0.2.0"
+    app_version: str = "0.2.1"
     log_level: str = "INFO"
 
     # --- PostgreSQL / pgvector ---

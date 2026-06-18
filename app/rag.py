@@ -23,20 +23,24 @@ def _format_context(passages: list[dict]) -> str:
 
 
 def _answer_with_claude(question: str, passages: list[dict], trace) -> dict:
+    import datetime
     import anthropic
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     context = _format_context(passages)
     user = f"EXTRAITS :\n{context}\n\nQUESTION : {question}"
+    t0 = datetime.datetime.now(datetime.timezone.utc)
     resp = client.messages.create(
         model=settings.answer_model,
         max_tokens=1024,
         system=SYSTEM,
         messages=[{"role": "user", "content": user}],
     )
+    t1 = datetime.datetime.now(datetime.timezone.utc)
     answer = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
     usage = {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}
     log_generation(trace, name="hermes.answer", model=settings.answer_model,
-                   input=user, output=answer, usage=usage)
+                   input=user, output=answer, usage=usage,
+                   start_time=t0, end_time=t1)
     return {"answer": answer, "usage": usage}
 
 

@@ -47,13 +47,19 @@ def observe(name: str, metadata: dict | None = None, input: object | None = None
 
 
 def log_generation(trace, *, name: str, model: str, input, output,
-                   usage: dict | None = None) -> None:
-    """Enregistre un appel LLM (coût/latence calculés par Langfuse via model+usage)."""
+                   usage: dict | None = None, start_time=None, end_time=None) -> None:
+    """Enregistre un appel LLM. Le coût est calculé par Langfuse via model+usage ;
+    la latence l'est via start_time/end_time (bornes réelles de l'appel)."""
     if trace is None:
         return
     try:
-        trace.generation(name=name, model=model, input=input, output=output,
-                         usage=usage or None)
+        kwargs = {"name": name, "model": model, "input": input,
+                  "output": output, "usage": usage or None}
+        if start_time is not None:
+            kwargs["start_time"] = start_time
+        if end_time is not None:
+            kwargs["end_time"] = end_time
+        trace.generation(**kwargs)
     except Exception:
         pass
 
