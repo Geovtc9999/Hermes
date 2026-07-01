@@ -36,6 +36,38 @@ Voir [`.env.example`](.env.example). Variables clés : `DATABASE_URL`,
 `S3_ENDPOINT`/`S3_ACCESS_KEY`/`S3_SECRET_KEY`/`S3_BUCKET`, `EMBED_MODEL`/`EMBED_DIM`,
 `ANTHROPIC_API_KEY` (option), `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST` (option).
 
+Les **valeurs réelles ne sont pas dans Git** (ADR-07) : elles vivent dans Coolify
+(recette) ou `/data/secrets/hermes.env` sur le serveur.
+
+### Bootstrap local (Windows / dev)
+
+```powershell
+cd hermes
+.\setup_env.ps1                    # cree .env depuis .env.example (chemins Windows)
+.\setup_env.ps1 -Interactive       # saisie DATABASE_URL + S3 (hors chat)
+.\setup_env.ps1 -FromFile C:\chemin\hermes.env   # export Coolify / serveur
+.\setup_env.ps1 -Tunnel            # localhost:5433 + :9000 (tunnels SSH recette)
+```
+
+**Où récupérer les secrets (recette)** :
+
+| Variable | Source Coolify |
+|----------|----------------|
+| `DATABASE_URL` | App Postgres `ysprg0oqzl86voh0kv0u6b6q` → mot de passe root + host réseau `recette` |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | App MinIO `minio-r625prgazwx67rtb157fa316` → credentials root ou user `cegid-sources` |
+| `LANGFUSE_*` | App Langfuse (optionnel) |
+
+**Tunnel SSH** (machine locale sans Docker, réseau recette distant) :
+
+```bash
+ssh -N -L 5433:ysprg0oqzl86voh0kv0u6b6q:5432 user@<hote-coolify>
+ssh -N -L 9000:minio-r625prgazwx67rtb157fa316:9000 user@<hote-coolify>
+```
+
+Puis `.\setup_env.ps1 -Tunnel` et relancer `python ..\09-CEGID\_ingest_v11_rag.py`.
+
+Dépendances Python : `pip install -r requirements.txt` (inclut `psycopg[binary]`).
+
 ## Déploiement
 
 Image Docker (voir `Dockerfile`). Sur Coolify : application Git, réseau `recette`

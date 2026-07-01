@@ -38,5 +38,16 @@ def get_bytes(key: str) -> bytes:
         resp.release_conn()
 
 
+def put_bytes(key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+    import io
+    client().put_object(
+        settings.s3_bucket,
+        key,
+        io.BytesIO(data),
+        length=len(data),
+        content_type=content_type,
+    )
+
+
 def bucket_exists() -> bool:
     return client().bucket_exists(settings.s3_bucket)

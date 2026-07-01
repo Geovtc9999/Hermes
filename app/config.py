@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     database_url: str | None = Field(default=None)
     pg_table: str = "hermes_chunks"
 
+    # --- Base GOUVERNANCE (schéma nexerp : knowledge_source / knowledge_chunk) ---
+    # Si absent, dérivée de database_url en remplaçant le nom de base par gov_db_name.
+    nexerp_database_url: str | None = Field(default=None)
+    gov_db_name: str = "nexerp"
+
     # --- Embeddings (fastembed, local, pas de clé externe) ---
     embed_model: str = "intfloat/multilingual-e5-large"
     embed_dim: int = 1024  # multilingual-e5-large -> 1024 ; ajuster si on change de modèle

@@ -43,6 +43,49 @@ def ingest_one(key: str) -> dict:
     return {"key": key, "status": "ok", "chunks": n, "version": version}
 
 
+def ingest_bytes(
+    key: str,
+    data: bytes,
+    *,
+    version: str | None = None,
+    domaine: str | None = None,
+    force: bool = True,
+) -> dict:
+    """Ingère un blob en mémoire (sans lecture MinIO)."""
+    if not supported(key):
+        return {"key": key, "status": "skip", "reason": "type-non-supporte", "chunks": 0}
+    if not force and key in db.existing_sources():
+        return {"key": key, "status": "skip", "reason": "deja-indexe", "chunks": 0}
+    text = extract_text(key, data)
+    chunks = _chunk(text)
+    if not chunks:
+        return {"key": key, "status": "skip", "reason": "texte-vide", "chunks": 0}
+    if version is None or domaine is None:
+        dv, dd = derive_meta(key)
+        version = version or dv
+        domaine = domaine or dd
+    vectors = embeddings.embed_passages(chunks)
+    rows = []
+    for idx, (c, v) in enumerate(zip(chunks, vectors)):
+        rows.append({
+            "source_key": key, "version": version, "domaine": domaine,
+            "chunk_index": idx, "content": c, "embedding": v,
+            "content_sha": hashlib.sha256(c.encode("utf-8")).hexdigest(),
+            "metadata": {"version": version, "domaine": domaine},
+        })
+    n = db.upsert_chunks(rows)
+    return {"key": key, "status": "ok", "chunks": n, "version": version, "domaine": domaine}
+
+
+def ingest_file(local_path: str, key: str | None = None, **kwargs) -> dict:
+    """Ingère un fichier local ; `key` = clé bucket (défaut : v11/specs/<basename>)."""
+    import os
+    key = key or f"v11/specs/{os.path.basename(local_path)}"
+    with open(local_path, "rb") as f:
+        data = f.read()
+    return ingest_bytes(key, data, **kwargs)
+
+
 def ingest(prefix: str = "", limit: int | None = None, force: bool = False) -> dict:
     """Ingère le corpus (ou un sous-ensemble). Reprenable : par défaut, les sources
     déjà indexées sont sautées (force=True pour tout ré-ingérer). Tracé Langfuse."""

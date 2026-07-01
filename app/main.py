@@ -86,6 +86,62 @@ def post_query(req: QueryReq):
                  domains=req.domains, versions=req.versions)
 
 
+# --------------------------------------------------------------------------- #
+# Indexation GOUVERNANCE (nexerp.knowledge_source / knowledge_chunk) + RBAC périmètre
+# --------------------------------------------------------------------------- #
+class GovIndexReq(BaseModel):
+    mode: str = "pilot"                    # "pilot" | "minio"
+    keys: list[str] | None = None          # mode=minio : clés bucket explicites
+    prefix: str = ""                       # mode=minio : préfixe bucket
+    limit: int = 12                        # mode=minio/pilot : nb max de sources
+    kind: str = "cegid_doc"                # cegid_doc | donnee_interne | reglementaire | autre
+    perimeter_id: str | None = None        # NULL = référentiel global org
+    org_id: str | None = None
+
+
+@app.post("/gov/index")
+def post_gov_index(req: GovIndexReq):
+    from . import govindex
+    if req.mode == "pilot":
+        return govindex.pilot(minio_limit=req.limit, minio_prefix=req.prefix)
+    if req.mode == "minio":
+        if not settings.s3_configured:
+            raise HTTPException(503, "Stockage objet non configuré")
+        keys = req.keys
+        if keys is None:
+            keys = [o["key"] for o in storage.list_objects(prefix=req.prefix)][: req.limit]
+        out = []
+        for k in keys:
+            try:
+                out.append(govindex.index_from_minio(
+                    k, kind=req.kind, perimeter_id=req.perimeter_id, org_id=req.org_id))
+            except Exception as e:
+                out.append({"key": k, "status": "error", "reason": str(e)[:200]})
+        return {"indexés": out, "stats": govindex.stats()}
+    raise HTTPException(400, "mode invalide (pilot|minio)")
+
+
+class GovSearchReq(BaseModel):
+    question: str
+    perimeters: list[str] | None = None    # None = pas de restriction (service/admin)
+    org_id: str | None = None
+    kinds: list[str] | None = None
+    k: int | None = None
+
+
+@app.post("/gov/search")
+def post_gov_search(req: GovSearchReq):
+    from . import govindex
+    return govindex.search(req.question, perimeters=req.perimeters,
+                           org_id=req.org_id, kinds=req.kinds, k=req.k)
+
+
+@app.get("/gov/stats")
+def get_gov_stats():
+    from . import govindex
+    return govindex.stats()
+
+
 @app.on_event("startup")
 def _startup():
     log.info("Hermes %s — démarrage", settings.app_version)
