@@ -142,6 +142,56 @@ def get_gov_stats():
     return govindex.stats()
 
 
+# --- Batch RESUMABLE : indexation de TOUT le corpus, en arrière-plan --------- #
+class GovReindexReq(BaseModel):
+    prefix: str = ""                       # limiter à un préfixe du bucket (optionnel)
+    kind: str = "cegid_doc"
+    perimeter_id: str | None = None        # NULL = référentiel global org
+    org_id: str | None = None
+    force: bool = False                    # True = ré-indexe même les docs déjà indexés
+    limit: int | None = None               # borne le nb d'objets (tests)
+    throttle: float = 0.0                  # pause (s) entre docs -> laisse du CPU au service
+
+
+@app.post("/gov/reindex")
+def post_gov_reindex(req: GovReindexReq):
+    """Lance en ARRIÈRE-PLAN l'indexation de tout le corpus MinIO (retour immédiat).
+    Suivre via GET /gov/reindex/status ; resumable (relancer reprend l'existant)."""
+    import threading
+
+    from . import govindex
+    if not settings.s3_configured:
+        raise HTTPException(503, "Stockage objet non configuré")
+    if govindex._reindex_state["running"]:
+        raise HTTPException(409, "Un batch d'indexation est déjà en cours")
+
+    def _run():
+        try:
+            govindex.reindex_corpus(
+                prefix=req.prefix, kind=req.kind, perimeter_id=req.perimeter_id,
+                org_id=req.org_id, skip_indexed=not req.force,
+                limit=req.limit, throttle=req.throttle)
+        except Exception as e:  # pragma: no cover
+            log.exception("reindex_corpus a échoué: %s", e)
+
+    threading.Thread(target=_run, name="gov-reindex", daemon=True).start()
+    return {"started": True, "status": govindex.reindex_status()}
+
+
+@app.get("/gov/reindex/status")
+def get_gov_reindex_status():
+    from . import govindex
+    return govindex.reindex_status()
+
+
+@app.post("/gov/reindex/cancel")
+def post_gov_reindex_cancel():
+    """Demande l'arrêt propre du batch après le document en cours."""
+    from . import govindex
+    govindex._reindex_state["cancel"] = True
+    return {"cancel_requested": True, "status": govindex.reindex_status()}
+
+
 @app.on_event("startup")
 def _startup():
     log.info("Hermes %s — démarrage", settings.app_version)

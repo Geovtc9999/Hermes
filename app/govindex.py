@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import threading
+import time
 from contextlib import contextmanager
 
 import psycopg
@@ -27,6 +30,8 @@ from . import embeddings, storage
 from .config import settings
 from .extract import derive_meta, extract_text, supported
 from .obs import observe
+
+log = logging.getLogger("hermes.govindex")
 
 KNOWLEDGE_KINDS = {"cegid_doc", "donnee_interne", "reglementaire", "autre"}
 
@@ -123,37 +128,41 @@ def index_document(
     vectors = embeddings.embed_passages(chunks)
     with _connect() as conn:
         oid = org_id or _default_org(conn)
-        row = conn.execute(
-            "SELECT id FROM nexerp.knowledge_source WHERE org_id=%s AND uri=%s",
-            (oid, uri),
-        ).fetchone()
-        if row:
-            sid = row[0]
-            conn.execute("DELETE FROM nexerp.knowledge_chunk WHERE source_id=%s", (sid,))
-            conn.execute(
-                "UPDATE nexerp.knowledge_source SET title=%s, kind=%s, perimeter_id=%s, indexed_at=now() WHERE id=%s",
-                (title, kind, perimeter_id, sid),
-            )
-        else:
-            sid = conn.execute(
-                "INSERT INTO nexerp.knowledge_source (org_id, kind, title, uri, perimeter_id, indexed_at) "
-                "VALUES (%s,%s,%s,%s,%s, now()) RETURNING id",
-                (oid, kind, title, uri, perimeter_id),
-            ).fetchone()[0]
-        with conn.cursor() as cur:
-            for idx, (c, v) in enumerate(zip(chunks, vectors)):
-                meta = {
-                    **(metadata or {}),
-                    "chunk_index": idx,
-                    "content_sha": hashlib.sha256(c.encode("utf-8")).hexdigest(),
-                    "title": title,
-                    "uri": uri,
-                }
-                cur.execute(
-                    "INSERT INTO nexerp.knowledge_chunk (source_id, content, embedding, metadata) "
-                    "VALUES (%s,%s,%s,%s)",
-                    (sid, c, v, json.dumps(meta, ensure_ascii=False)),
+        # Atomique par document : upsert source + (ré)insertion des chunks dans UNE
+        # transaction. Une interruption (kill/restart) laisse le doc absent plutôt
+        # que partiel -> la reprise (reindex_corpus) le ré-indexe proprement.
+        with conn.transaction():
+            row = conn.execute(
+                "SELECT id FROM nexerp.knowledge_source WHERE org_id=%s AND uri=%s",
+                (oid, uri),
+            ).fetchone()
+            if row:
+                sid = row[0]
+                conn.execute("DELETE FROM nexerp.knowledge_chunk WHERE source_id=%s", (sid,))
+                conn.execute(
+                    "UPDATE nexerp.knowledge_source SET title=%s, kind=%s, perimeter_id=%s, indexed_at=now() WHERE id=%s",
+                    (title, kind, perimeter_id, sid),
                 )
+            else:
+                sid = conn.execute(
+                    "INSERT INTO nexerp.knowledge_source (org_id, kind, title, uri, perimeter_id, indexed_at) "
+                    "VALUES (%s,%s,%s,%s,%s, now()) RETURNING id",
+                    (oid, kind, title, uri, perimeter_id),
+                ).fetchone()[0]
+            with conn.cursor() as cur:
+                for idx, (c, v) in enumerate(zip(chunks, vectors)):
+                    meta = {
+                        **(metadata or {}),
+                        "chunk_index": idx,
+                        "content_sha": hashlib.sha256(c.encode("utf-8")).hexdigest(),
+                        "title": title,
+                        "uri": uri,
+                    }
+                    cur.execute(
+                        "INSERT INTO nexerp.knowledge_chunk (source_id, content, embedding, metadata) "
+                        "VALUES (%s,%s,%s,%s)",
+                        (sid, c, v, json.dumps(meta, ensure_ascii=False)),
+                    )
     return {
         "title": title,
         "uri": uri,
@@ -277,6 +286,108 @@ def stats() -> dict:
         "sources_par_kind": dict(by_kind),
         "sources_scopées_périmètre": scoped,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Batch RESUMABLE : indexation de TOUT le corpus (job d'arrière-plan)
+# --------------------------------------------------------------------------- #
+# État in-process du job (un seul batch à la fois). Suivi via reindex_status().
+_reindex_lock = threading.Lock()
+_reindex_state: dict = {
+    "running": False, "started_at": None, "finished_at": None,
+    "total": 0, "done": 0, "skipped": 0, "errors": 0, "chunks_indexed": 0,
+    "current": None, "last_error": None, "cancel": False,
+}
+
+
+def _indexed_uris(conn, org_id) -> set:
+    """URIs déjà indexées (source présente ET au moins un chunk) -> reprise."""
+    rows = conn.execute(
+        "SELECT ks.uri FROM nexerp.knowledge_source ks "
+        "WHERE ks.org_id = %s AND EXISTS "
+        "(SELECT 1 FROM nexerp.knowledge_chunk kc WHERE kc.source_id = ks.id)",
+        (org_id,),
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def reindex_status() -> dict:
+    """Instantané du job batch (avancement + ETA estimé)."""
+    st = dict(_reindex_state)
+    treated = st["done"] + st["skipped"] + st["errors"]
+    st["progress"] = f"{treated}/{st['total']}" if st["total"] else "0/0"
+    st["eta_seconds"] = None
+    if st["running"] and st["started_at"] and st["done"] > 0:
+        elapsed = time.time() - st["started_at"]
+        rate = st["done"] / elapsed if elapsed > 0 else 0.0
+        remaining = max(0, st["total"] - treated)
+        st["eta_seconds"] = int(remaining / rate) if rate > 0 else None
+    return st
+
+
+def reindex_corpus(*, prefix: str = "", kind: str = "cegid_doc",
+                   perimeter_id: str | None = None, org_id: str | None = None,
+                   skip_indexed: bool = True, limit: int | None = None,
+                   throttle: float = 0.0) -> dict:
+    """Indexe TOUT le corpus MinIO dans le schéma gouvernance, de façon resumable.
+
+    - Idempotent / reprise : saute les objets dont l'uri est déjà indexée (source +
+      chunks), sauf `skip_indexed=False` (ré-indexation forcée intégrale).
+    - Robuste : un document en échec est compté (`errors`) sans interrompre le lot.
+    - Atomique par document (cf. index_document) : une interruption ne laisse pas de
+      doc partiel ; relancer le batch reprend proprement là où il s'est arrêté.
+    Conçu pour tourner dans un thread d'arrière-plan (les secrets S3/DB sont hérités
+    du process uvicorn, lancé sous `infisical run`).
+    """
+    with _reindex_lock:
+        if _reindex_state["running"]:
+            raise RuntimeError("Un batch d'indexation est déjà en cours")
+        _reindex_state.update(
+            running=True, started_at=time.time(), finished_at=None,
+            total=0, done=0, skipped=0, errors=0, chunks_indexed=0,
+            current=None, last_error=None, cancel=False,
+        )
+    try:
+        with _connect() as conn:
+            oid = org_id or _default_org(conn)
+            done_uris = _indexed_uris(conn, oid) if skip_indexed else set()
+        objects = [o for o in storage.list_objects(prefix=prefix) if supported(o["key"])]
+        if limit:
+            objects = objects[:limit]
+        _reindex_state["total"] = len(objects)
+        log.info("reindex_corpus: %d objets candidats (déjà indexés à sauter: %d)",
+                 len(objects), len(done_uris))
+        with observe(name="hermes.gov_reindex_corpus",
+                     metadata={"total": len(objects), "prefix": prefix, "kind": kind}):
+            for o in objects:
+                if _reindex_state["cancel"]:
+                    log.info("reindex_corpus: annulation demandée -> arrêt")
+                    break
+                key = o["key"]
+                uri = f"s3://{settings.s3_bucket}/{key}"
+                if skip_indexed and uri in done_uris:
+                    _reindex_state["skipped"] += 1
+                    continue
+                _reindex_state["current"] = key
+                try:
+                    r = index_from_minio(key, kind=kind,
+                                         perimeter_id=perimeter_id, org_id=oid)
+                    _reindex_state["chunks_indexed"] += int(r.get("chunks", 0) or 0)
+                    _reindex_state["done"] += 1
+                except Exception as e:  # robustesse : on continue le lot
+                    _reindex_state["errors"] += 1
+                    _reindex_state["last_error"] = f"{key}: {str(e)[:200]}"
+                    log.warning("reindex_corpus: échec %s: %s", key, e)
+                if throttle:
+                    time.sleep(throttle)
+    finally:
+        _reindex_state["running"] = False
+        _reindex_state["current"] = None
+        _reindex_state["finished_at"] = time.time()
+        log.info("reindex_corpus: terminé done=%d skipped=%d errors=%d chunks=%d",
+                 _reindex_state["done"], _reindex_state["skipped"],
+                 _reindex_state["errors"], _reindex_state["chunks_indexed"])
+    return dict(_reindex_state)
 
 
 # --------------------------------------------------------------------------- #
